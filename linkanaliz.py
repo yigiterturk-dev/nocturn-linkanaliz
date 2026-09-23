@@ -156,6 +156,42 @@ def jev_kararlar(ciftler, model, esik):
         print(f"  [jev] parça: {len(parca)} aday kararlandı")
     return kabul, kullanim
 
+
+# ——— Internal PageRank + Orphan tespiti ———
+def pagerank_analiz(sayfalar, damping=0.85, tur=40):
+    """İç link grafiği üzerinde PageRank + orphan sayfa tespiti.
+
+    Dangling node (dışa çıkan sıfır link) kütlesi PageRank'ı çeker —
+    klasik çözüm: kütle tüm düğümlere eşit dağıtılır.
+    """
+    # URL normalize: trailing slash uyuşmazlığı grafiği koparıyordu (29 sahte
+    # orphan — gerçek vaka: blog.rust-lang.org sayfaları /'lı, linkler /'sız).
+    norm = lambda u: u.rstrip("/")
+    url2sayfa = {norm(s["url"]): s for s in sayfalar}
+    kenarlar = {}
+    for s in sayfalar:
+        hedefler = set()
+        for l in s["linkler"]:
+            hedef = norm(l)
+            if hedef in url2sayfa and hedef != norm(s["url"]):
+                hedefler.add(hedef)
+        kenarlar[norm(s["url"])] = sorted(hedefler)
+    dugumler = [norm(s["url"]) for s in sayfalar]
+    pr = {u: 1.0 / len(dugumler) for u in dugumler}
+    giris = {u: 0 for u in dugumler}
+    for u, hedefler in kenarlar.items():
+        for h in hedefler: giris[h] += 1
+    for _ in range(tur):
+        damla = sum(pr[u] for u in dugumler if not kenarlar[u]) / len(dugumler)
+        yeni = {u: damla + (1 - damping) / len(dugumler) for u in dugumler}
+        for u in dugumler:
+            if kenarlar[u]:
+                pay = damping * pr[u] / len(kenarlar[u])
+                for h in kenarlar[u]: yeni[h] += pay
+        pr = yeni
+    orfanlar = sorted(u for u in dugumler if giris[u] == 0)
+    return pr, giris, orfanlar, dugumler
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("site"); ap.add_argument("--limit", type=int, default=30)
@@ -202,6 +238,11 @@ def main():
     print(f"aday çift: {len(ciftler)} (TF-IDF ön-filtre sonrası — Jev'e yalnız bunlar gidiyor)")
     kabul, kullanim = jev_kararlar(ciftler, a.model, a.esik)
 
+    pr, giris, orfanlar, dugumler = pagerank_analiz(sayfalar)
+    orfan_not = (f"⚠️ ORPHAN SAYFA: {len(orfanlar)} sayfanın içten linki YOK "
+                 f"({', '.join(u.split('/')[-1] or u for u in orfanlar[:5])})") if orfanlar else                 "✓ orphan sayfa yok — her sayfaya içeriden en az bir link var"
+    print("\n" + orfan_not)
+
     tarih = time.strftime("%Y-%m-%d")
     csv_yol = f"link-oneri-{a.site.replace('https://','').replace('/','_')}-{tarih}.csv"
     with open(csv_yol, "w", newline="", encoding="utf-8-sig") as f:
@@ -218,6 +259,13 @@ def main():
         print(f"        anchor: {k['anchor']}")
     print(f"\nCSV: {csv_yol}")
     print(f"Jev kullanımı: {kullanim['input_tokens']} in / {kullanim['output_tokens']} out · süre {sure}s")
+    pr_yol = f"pagerank-{a.site.replace('https://','').replace('/','_')}-{tarih}.csv"
+    with open(pr_yol, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f); w.writerow(["url", "pagerank", "ic_giris", "orphan"])
+        for u in sorted(dugumler, key=lambda x: -pr[x]):
+            w.writerow([u, round(pr[u], 5), giris[u], "EVET" if giris[u] == 0 else ""])
+    print(f"PageRank CSV: {pr_yol} (top 3: " + ", ".join(
+        f"{u.split('/')[-1]} {round(pr[u],4)}" for u in sorted(dugumler, key=lambda x: -pr[x])[:3]) + ")")
 
 if __name__ == "__main__":
     main()
